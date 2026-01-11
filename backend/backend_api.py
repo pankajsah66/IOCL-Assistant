@@ -1,6 +1,6 @@
 """
 IOCL ChatGPT-Style Backend API
-Flask server with document support and context-based Q&A
+Flask server with document support, context-based Q&A, and conversation history
 """
 
 from flask import Flask, request, jsonify
@@ -11,6 +11,7 @@ import requests
 import re
 import base64
 from werkzeug.utils import secure_filename
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -19,7 +20,7 @@ CORS(app)
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_FILE_EXTENSIONS = {'pdf', 'txt'}
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-OLLAMA_URL = "https://anjanette-prodistribution-undifferentiably.ngrok-free.dev"  # ← CHANGED: Your ngrok URL
+OLLAMA_URL = "https://anjanette-prodistribution-undifferentiably.ngrok-free.dev"
 MODEL_NAME = "mistral"
 
 # Context file path
@@ -27,9 +28,10 @@ CONTEXT_FILE_PATH = "context.txt"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Store content in memory
+# Storage
 content_storage = {}
 predefined_context = None
+conversation_history = {}  # Store conversation history by conversation_id
 
 
 def allowed_file(filename, allowed_extensions):
@@ -105,6 +107,21 @@ def find_relevant_context(content, question, max_length=3000):
     return context
 
 
+def build_conversation_context(conversation_id, max_turns=3):
+    """Build context from recent conversation history"""
+    if conversation_id not in conversation_history or len(conversation_history[conversation_id]) == 0:
+        return ""
+    
+    history = conversation_history[conversation_id][-max_turns:]
+    context = "\n\nPrevious conversation:\n"
+    
+    for item in history:
+        context += f"User: {item['question']}\n"
+        context += f"Assistant: {item['answer']}\n\n"
+    
+    return context
+
+
 def ask_ollama(prompt, model=MODEL_NAME):
     """Send prompt to Ollama"""
     try:
@@ -115,7 +132,6 @@ def ask_ollama(prompt, model=MODEL_NAME):
             "stream": False
         }
         
-        # ← ADDED: Header to bypass ngrok warning
         headers = {
             "ngrok-skip-browser-warning": "true"
         }
@@ -137,13 +153,12 @@ def analyze_image_with_ollama(image_base64, prompt):
     try:
         url = f"{OLLAMA_URL}/api/generate"
         payload = {
-            "model": "llava",  # Vision model
+            "model": "llava",
             "prompt": prompt,
             "images": [image_base64],
             "stream": False
         }
         
-        # ← ADDED: Header to bypass ngrok warning
         headers = {
             "ngrok-skip-browser-warning": "true"
         }
@@ -185,7 +200,7 @@ def health_check():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Universal chat endpoint - handles text, images, and files"""
+    """Universal chat endpoint - handles text, images, and files with conversation history"""
     try:
         # Check if request has files
         has_files = 'file' in request.files or 'image' in request.files
@@ -194,73 +209,95 @@ def chat():
             # Handle file/image upload
             if 'image' in request.files:
                 image_file = request.files['image']
+                conversation_id = request.form.get('conversation_id', 'default')
+                
                 if image_file and allowed_file(image_file.filename, ALLOWED_IMAGE_EXTENSIONS):
-                    # Save image temporarily
                     filename = secure_filename(image_file.filename)
                     filepath = os.path.join(UPLOAD_FOLDER, filename)
                     image_file.save(filepath)
                     
-                    # Encode to base64
                     image_base64 = encode_image_to_base64(filepath)
-                    
-                    # Get user question
                     question = request.form.get('question', 'What is in this image?')
                     
-                    # Analyze image
-                    answer = analyze_image_with_ollama(image_base64, question)
+                    # Build conversation context
+                    history_context = build_conversation_context(conversation_id)
+                    full_prompt = f"{history_context}\n\nCurrent question about image: {question}"
                     
-                    # Clean up
+                    answer = analyze_image_with_ollama(image_base64, full_prompt)
+                    
+                    # Store in conversation history
+                    if conversation_id not in conversation_history:
+                        conversation_history[conversation_id] = []
+                    
+                    conversation_history[conversation_id].append({
+                        'question': question,
+                        'answer': answer,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
                     os.remove(filepath)
                     
                     return jsonify({
                         "success": True,
                         "answer": answer,
+                        "conversation_id": conversation_id,
                         "type": "image"
                     })
             
             elif 'file' in request.files:
                 file = request.files['file']
+                conversation_id = request.form.get('conversation_id', 'default')
+                
                 if file and allowed_file(file.filename, ALLOWED_FILE_EXTENSIONS):
                     filename = secure_filename(file.filename)
                     filepath = os.path.join(UPLOAD_FOLDER, filename)
                     file.save(filepath)
                     
-                    # Extract text
                     file_ext = filename.rsplit('.', 1)[1].lower()
                     if file_ext == 'pdf':
                         extracted_text = extract_text_from_pdf(filepath)
                     else:
                         extracted_text = extract_text_from_txt(filepath)
                     
-                    # Store in memory with session ID
                     session_id = filename.rsplit('.', 1)[0]
                     content_storage[session_id] = extracted_text
                     
-                    # Get question
                     question = request.form.get('question', '')
                     
                     if question:
-                        # Answer question about the file
                         context = find_relevant_context(extracted_text, question)
-                        prompt = f"""Based on this document content, answer the question:
+                        history_context = build_conversation_context(conversation_id)
+                        
+                        prompt = f"""Based on this document content and previous conversation, answer the question:
 
 Document:
 {context}
+{history_context}
 
-Question: {question}
+Current question: {question}
 
 Answer:"""
                         answer = ask_ollama(prompt)
+                        
+                        # Store in conversation history
+                        if conversation_id not in conversation_history:
+                            conversation_history[conversation_id] = []
+                        
+                        conversation_history[conversation_id].append({
+                            'question': question,
+                            'answer': answer,
+                            'timestamp': datetime.now().isoformat()
+                        })
                     else:
                         answer = f"File '{filename}' uploaded successfully. You can now ask questions about it."
                     
-                    # Clean up file but keep content in memory
                     os.remove(filepath)
                     
                     return jsonify({
                         "success": True,
                         "answer": answer,
                         "session_id": session_id,
+                        "conversation_id": conversation_id,
                         "type": "document"
                     })
         
@@ -269,46 +306,108 @@ Answer:"""
             data = request.json
             question = data.get('question', '')
             use_context = data.get('use_context', False)
-            session_id = data.get('session_id', None)  # Check if there's an active session
+            session_id = data.get('session_id', None)
+            conversation_id = data.get('conversation_id', 'default')
             
             if not question:
                 return jsonify({"error": "No question provided"}), 400
             
+            # Initialize conversation history if needed
+            if conversation_id not in conversation_history:
+                conversation_history[conversation_id] = []
+            
+            # Build conversation context
+            history_context = build_conversation_context(conversation_id)
+            
             # Priority: 1. Session document, 2. Predefined context, 3. General question
             if session_id and session_id in content_storage:
-                # Use the uploaded document from session
                 context = find_relevant_context(content_storage[session_id], question)
-                prompt = f"""Based on this document content, answer the question:
+                prompt = f"""Based on this document content and previous conversation, answer the question:
 
 Document:
 {context}
+{history_context}
 
-Question: {question}
+Current question: {question}
 
 Answer:"""
             elif use_context and predefined_context:
-                # Use predefined context
                 context = find_relevant_context(predefined_context, question)
-                prompt = f"""Based on this context, answer the question:
+                prompt = f"""Based on this context and previous conversation, answer the question:
 
 Context:
 {context}
+{history_context}
 
-Question: {question}
+Current question: {question}
 
 Answer:"""
             else:
-                # Direct question without context
-                prompt = question
+                if history_context:
+                    prompt = f"""{history_context}
+
+Current question: {question}
+
+Answer:"""
+                else:
+                    prompt = question
             
             answer = ask_ollama(prompt)
+            
+            # Store in conversation history
+            conversation_history[conversation_id].append({
+                'question': question,
+                'answer': answer,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Keep only last 20 exchanges to avoid memory issues
+            if len(conversation_history[conversation_id]) > 20:
+                conversation_history[conversation_id] = conversation_history[conversation_id][-20:]
             
             return jsonify({
                 "success": True,
                 "answer": answer,
+                "conversation_id": conversation_id,
                 "type": "text"
             })
     
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/clear-conversation', methods=['POST'])
+def clear_conversation():
+    """Clear conversation history for a specific conversation_id"""
+    try:
+        data = request.json
+        conversation_id = data.get('conversation_id', 'default')
+        
+        if conversation_id in conversation_history:
+            del conversation_history[conversation_id]
+        
+        return jsonify({
+            "success": True,
+            "message": f"Conversation '{conversation_id}' cleared"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/conversation-history', methods=['GET'])
+def get_conversation_history():
+    """Get conversation history for a specific conversation_id"""
+    try:
+        conversation_id = request.args.get('conversation_id', 'default')
+        
+        history = conversation_history.get(conversation_id, [])
+        
+        return jsonify({
+            "success": True,
+            "conversation_id": conversation_id,
+            "history": history,
+            "count": len(history)
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -318,7 +417,9 @@ def context_status():
     """Check if context file is loaded"""
     return jsonify({
         "loaded": predefined_context is not None,
-        "file_path": CONTEXT_FILE_PATH
+        "file_path": CONTEXT_FILE_PATH,
+        "active_conversations": len(conversation_history),
+        "total_messages": sum(len(history) for history in conversation_history.values())
     })
 
 
@@ -332,7 +433,6 @@ if __name__ == '__main__':
     print(f"Image support: Install 'ollama pull llava' for images")
     print("-" * 60)
     
-    # Load predefined context
     load_context_file()
     
     print("-" * 60)
