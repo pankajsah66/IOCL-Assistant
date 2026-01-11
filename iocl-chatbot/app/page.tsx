@@ -110,12 +110,12 @@ export default function ChatGPTStyle() {
           formData.append('question', userMessage);
         }
 
-        response = await fetch('http://localhost:5000/api/chat', {
+        response = await fetch('https://iocl-assistant-3.onrender.com/api/chat', {
           method: 'POST',
           body: formData,
         });
       } else {
-        response = await fetch('http://localhost:5000/api/chat', {
+        response = await fetch('https://iocl-assistant-3.onrender.com/api/chat', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
