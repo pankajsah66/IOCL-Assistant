@@ -19,7 +19,7 @@ CORS(app)
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_FILE_EXTENSIONS = {'pdf', 'txt'}
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = "https://anjanette-prodistribution-undifferentiably.ngrok-free.dev"  # ← CHANGED: Your ngrok URL
 MODEL_NAME = "mistral"
 
 # Context file path
@@ -115,7 +115,12 @@ def ask_ollama(prompt, model=MODEL_NAME):
             "stream": False
         }
         
-        response = requests.post(url, json=payload, timeout=120)
+        # ← ADDED: Header to bypass ngrok warning
+        headers = {
+            "ngrok-skip-browser-warning": "true"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
         
         if response.status_code == 200:
             result = response.json()
@@ -138,7 +143,12 @@ def analyze_image_with_ollama(image_base64, prompt):
             "stream": False
         }
         
-        response = requests.post(url, json=payload, timeout=120)
+        # ← ADDED: Header to bypass ngrok warning
+        headers = {
+            "ngrok-skip-browser-warning": "true"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
         
         if response.status_code == 200:
             result = response.json()
